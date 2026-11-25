@@ -29,36 +29,43 @@ def manifest(path, classes, nonempty=False):
             yield row["image"], truth
 
 
-def neighbors(path, classes):
+def neighbors(path, classes, *, subset=False):
     rows = [truth for _, truth in manifest(path, classes)]
-    count = len(rows) // 100
-    if count == 0:
-        raise ValueError("A one-percent subset needs at least 100 training images")
-    sample = np.random.default_rng(1).permutation(len(rows))[:count]
-    labels = np.stack([rows[i] for i in sample]).astype(np.int64)
+    if not subset:
+        count = len(rows) // 100
+        if count == 0:
+            raise ValueError("A one-percent subset needs at least 100 training images")
+        sample = np.random.default_rng(1).permutation(len(rows))[:count]
+        rows = [rows[i] for i in sample]
+    if not rows:
+        raise ValueError("The selected training subset is empty")
+    labels = np.stack(rows).astype(np.int64)
     joint = labels.T @ labels
     np.fill_diagonal(joint, 0)
     # For each target the denominator is fixed, so joint counts rank P(neighbor | target).
     order = np.argsort(-joint, axis=1, kind="stable")[:, :3]
     selected = np.where(np.take_along_axis(joint, order, axis=1) >= 3, order, -1)
-    return selected, count
+    return selected, len(rows)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", choices=DATASETS, default="coco")
-    parser.add_argument("--train", type=Path, help="Check crop neighbors using a full training CSV")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--train", type=Path, help="Draw the fixed one-percent subset from a full training CSV")
+    group.add_argument("--subset", type=Path, help="Use all rows in an already selected training subset")
     args = parser.parse_args()
     with np.load(PRESETS / (args.dataset + ".npz"), allow_pickle=False) as preset:
         labels = preset["labels"].tolist()
         expected = preset["neighbors"]
-    if args.train:
-        result, count = neighbors(args.train, len(labels))
+    source = args.subset or args.train
+    if source:
+        result, count = neighbors(source, len(labels), subset=args.subset is not None)
         different = np.flatnonzero(np.any(result != expected, axis=1))
         if len(different):
             names = ", ".join(labels[i] for i in different)
             parser.exit(1, f"Crop neighbors differ for {names}\n")
-        print(f"{count} training images sampled. Crop neighbors match for all {len(labels)} classes.")
+        print(f"Crop neighbors match for all {len(labels)} classes using {count} training images.")
     else:
         for index, name in enumerate(labels):
             print(f"{index}\t{name}")
